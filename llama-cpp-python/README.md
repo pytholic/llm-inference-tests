@@ -1,0 +1,5 @@
+- Install the following requirements
+-   [llama-cpp-python](https://github.com/abetlen/llama-cpp-python)
+-   [gputil](https://github.com/anderskm/gputil)
+-   [psutil](https://pypi.org/project/psutil/)
+-   numpy
