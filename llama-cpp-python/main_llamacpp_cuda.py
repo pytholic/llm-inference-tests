@@ -5,11 +5,18 @@ import gc
 
 import numpy as np
 from llama_cpp import Llama
+import psutil
+import GPUtil
 
 
 class MetricsCollector:
     def __init__(self):
         self.reset()
+        self.process = psutil.Process(os.getpid())  # Get current process
+        self.initial_ram = self.get_ram_usage()
+        self.peak_ram = self.initial_ram
+        self.initial_vram = 0
+        self.peak_vram = 0
 
     def reset(self):
         self.metrics = {
@@ -21,6 +28,30 @@ class MetricsCollector:
             "predicted_per_second": 0,
             "tpot_ms": 0,
         }
+
+    def get_ram_usage(self):
+        return self.process.memory_info().rss / (1024 * 1024)  # in MB
+
+    def get_vram_usage(self):
+        try:
+            gpus = GPUtil.getGPUs()
+            if gpus:
+                # Assuming you only use one GPU, get the first one.
+                gpu = gpus[0]
+                return gpu.memoryUsed, gpu.memoryTotal  # in MB
+            else:
+                return 0, 0
+        except Exception as e:
+            print(f"Error getting VRAM usage: {e}")
+            return 0, 0  # Return 0 if no GPU found or error
+
+    def update_peak_ram(self):
+        current_ram = self.get_ram_usage()
+        self.peak_ram = max(self.peak_ram, current_ram)
+
+    def update_peak_vram(self):
+        current_vram, _ = self.get_vram_usage()
+        self.peak_vram = max(self.peak_vram, current_vram)
 
 
 def generate_text_stream(
@@ -58,6 +89,8 @@ def generate_text_stream(
                 content = chunk["choices"][0]["delta"]["content"]
                 completion_tokens += 1
                 yield content
+            metrics_collector.update_peak_ram()  # Check RAM after each chunk
+            metrics_collector.update_peak_vram()  # Check VRAM after each chunk
 
         generation_end = time.perf_counter()
         generation_time = generation_end - (prompt_end if first_token_generated else start_time)
@@ -88,7 +121,7 @@ def run_inference_multiple_times(prompts: list[str]):
 
     model_path = os.getenv(
         "MODEL_PATH",
-        "models_gguf/Llama-3.1-8B-Instruct-GGUF/llama-3.1-8b-instruct.gguf",
+        "../models_gguf/Phi-3.5-mini-instruct-Q4_0-GGUF/phi-3.5-mini-instruct-q4_0.gguf",
     )
 
     llm = Llama(
@@ -104,12 +137,16 @@ def run_inference_multiple_times(prompts: list[str]):
         flash_attn=True,
     )
 
+    metrics_collector.initial_vram, _ = metrics_collector.get_vram_usage()
+
     try:
         for i, prompt in enumerate(prompts):
             print(f"\nPrompt {i+1}/{len(prompts)}")
             print(f"Prompt: {prompt[:100]}...")
 
-            metrics_collector.reset()
+            metrics_collector.reset()  # Reset token counts, timings
+            # Initial memory usage (before prompt processing)
+            initial_ram = metrics_collector.initial_ram
 
             try:
                 for text_chunk in generate_text_stream(llm, prompt, metrics_collector):
@@ -124,6 +161,22 @@ def run_inference_multiple_times(prompts: list[str]):
             llm.reset()
             gc.collect()  # Force garbage collection between runs
             time.sleep(1)  # Cool-down period between runs
+
+            # Get peak memory usage from the collector
+            peak_ram = metrics_collector.peak_ram
+            peak_vram = metrics_collector.peak_vram
+
+            # Calculate inference memory usage
+            inference_ram = peak_ram - initial_ram
+            inference_vram = peak_vram - metrics_collector.initial_vram
+
+            print("\nMemory Usage:")
+            print(f"  Initial RAM:      {initial_ram:.2f} MB")
+            print(f"  Inference RAM:    {inference_ram:.2f} MB")
+            print(f"  Peak RAM:         {peak_ram:.2f} MB")
+            print(f"  Initial VRAM:     {metrics_collector.initial_vram:.2f} MB")
+            print(f"  Inference VRAM:   {inference_vram:.2f} MB")
+            print(f"  Peak VRAM:        {peak_vram:.2f} MB")
 
     finally:
         del llm
@@ -174,6 +227,6 @@ if __name__ == "__main__":
     Write a short poem about a cat.
     """
 
-    prompts = [prompt] * 3
+    prompts = [prompt] * 1
 
     run_inference_multiple_times(prompts)
